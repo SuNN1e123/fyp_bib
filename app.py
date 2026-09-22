@@ -90,10 +90,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✨ My FYP Research Hub (分區卡片 + PDF 原件儲存版)")
+st.title("✨ My FYP Research Hub (分區卡片 + 移動/複製文獻)")
 st.caption(
-    "結合獨立分類卡片框與資料庫永久儲存，PDF 原件隨時下載，高效管理您的 FYP"
-    " 文獻！"
+    "結合獨立分類卡片框、PDF 原件儲存，以及便捷的文獻移動與複製功能，高效管理您的"
+    " FYP 文獻！"
 )
 
 # 讀取當前資料庫中的分類
@@ -204,7 +204,7 @@ with tab1:
       if not cat_papers:
         st.caption(
             "暫時未有文獻歸納在此分類中。可透過「上載與 AI"
-            " 智能解析」加入, 或在下方修改文獻分類。"
+            " 智能解析」加入，或使用下方功能進行移動/複製。"
         )
       else:
         for paper_id, title, authors, year, citation, filename, pdf_blob in (
@@ -214,37 +214,65 @@ with tab1:
             st.write(f"**作者：** {authors}")
             st.write(f"**APA 7th Citation：** `{citation}`")
 
-            col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
+            # 操作按鈕佈局調整
+            col_dl, col_move, col_copy, col_del = st.columns([2, 2, 2, 1])
 
-            with col_btn1:
+            with col_dl:
               if pdf_blob:
                 st.download_button(
-                    label="📥 下載 PDF 原件",
+                    label="📥 下載 PDF",
                     data=pdf_blob,
                     file_name=filename if filename else f"paper_{paper_id}.pdf",
                     mime="application/pdf",
                     key=f"dl_{paper_id}",
                 )
               else:
-                st.caption("無附帶 PDF 原件")
+                st.caption("無 PDF")
 
-            with col_btn2:
-              new_assigned_cat = st.selectbox(
-                  "流動到其他分類",
+            with col_move:
+              target_move_cat = st.selectbox(
+                  "移動至",
                   categories,
                   index=categories.index(cat) if cat in categories else 0,
-                  key=f"move_cat_{paper_id}",
+                  key=f"move_cat_sel_{paper_id}",
+                  label_visibility="collapsed",
               )
-              if st.button("確認轉移", key=f"btn_move_{paper_id}"):
+              if st.button("🚚 移動", key=f"btn_move_{paper_id}"):
                 c.execute(
                     "UPDATE papers SET category = ? WHERE id = ?",
-                    (new_assigned_cat, paper_id),
+                    (target_move_cat, paper_id),
                 )
                 conn.commit()
-                st.success(f"已成功將文獻轉移至：{new_assigned_cat}")
+                st.success(f"已成功移動至：{target_move_cat}")
                 st.rerun()
 
-            with col_btn3:
+            with col_copy:
+              target_copy_cat = st.selectbox(
+                  "複製至",
+                  categories,
+                  index=categories.index(cat) if cat in categories else 0,
+                  key=f"copy_cat_sel_{paper_id}",
+                  label_visibility="collapsed",
+              )
+              if st.button("📋 複製", key=f"btn_copy_{paper_id}"):
+                c.execute(
+                    """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        title,
+                        authors,
+                        year,
+                        target_copy_cat,
+                        citation,
+                        pdf_blob,
+                        filename,
+                    ),
+                )
+                conn.commit()
+                st.success(f"已成功複製一份至：{target_copy_cat}")
+                st.rerun()
+
+            with col_del:
               if st.button("🗑️ 刪除", key=f"del_{paper_id}"):
                 c.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
                 conn.commit()
