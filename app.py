@@ -76,7 +76,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✨ My FYP Research Hub (雲端共用 + 永久儲存版)")
+st.title("✨ My FYP Research Hub ")
 st.caption(
     "結合 OpenRouter AI 讀取 PDF、自動識別作者，資料自動永久儲存並支援多人協同！"
 )
