@@ -6,7 +6,6 @@ from openai import OpenAI
 import streamlit as st
 
 # --- 安全讀取 OpenRouter API Key ---
-# 本地測試時可以在專案建立 .streamlit/secrets.toml，或者上雲端時在 Settings -> Secrets 設定
 try:
   OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 except Exception:
@@ -76,7 +75,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✨ My FYP Research Hub ")
+st.title("✨ My FYP Research Hub (雲端共用 + 永久儲存版)")
 st.caption(
     "結合 OpenRouter AI 讀取 PDF、自動識別作者，資料自動永久儲存並支援多人協同！"
 )
@@ -85,7 +84,9 @@ st.caption(
 c.execute("SELECT name FROM categories")
 categories = [row[0] for row in c.fetchall()]
 
-tab1, tab2 = st.tabs(["📚 文獻資料庫 (Database)", "📤 上載與 AI 智能解析"])
+tab1, tab2 = tab1, tab2 = st.tabs(
+    ["📚 文獻資料庫 (Database)", "📤 上載與 AI 智能解析"]
+)
 
 # --- 分頁一：文獻資料庫 ---
 with tab1:
@@ -140,14 +141,40 @@ with tab1:
     st.info("暫時未有相關文獻，快去「上載與 AI 智能解析」新增幾篇啦！")
   else:
     for paper_id, title, authors, year, category, citation in filtered_papers:
-      with st.expander(f"📄 {title} ({year})"):
+      with st.expander(f"📄 {title} ({year})  —  [{category}]"):
         c1, c2 = st.columns([3, 1])
         with c1:
           st.write(f"**作者：** {authors}")
           st.write(f"**APA 7th Citation：** `{citation}`")
+          st.markdown(f"**目前分類：** `{category}`")
+
+          # 💡 新增：修改分類的表單/互動區
+          with st.form(key=f"edit_form_{paper_id}"):
+            new_selected_cat = st.selectbox(
+                "更改為新分類",
+                categories,
+                index=(
+                    categories.index(category)
+                    if category in categories
+                    else 0
+                ),
+                key=f"select_cat_{paper_id}",
+            )
+            col_sub1, col_sub2 = st.columns(2)
+            with col_sub1:
+              update_btn = st.form_submit_button("🔄 更新分類")
+            if update_btn:
+              c.execute(
+                  "UPDATE papers SET category = ? WHERE id = ?",
+                  (new_selected_cat, paper_id),
+              )
+              conn.commit()
+              st.success(f"成功將分類更新為：{new_selected_cat}")
+              st.rerun()
+
         with c2:
-          st.markdown(f"**分類夾：** `{category}`")
-          if st.button("🗑️ 刪除", key=f"del_{paper_id}"):
+          st.write("")  # 排版留空
+          if st.button("🗑️ 刪除文獻", key=f"del_{paper_id}"):
             c.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
             conn.commit()
             st.success("已成功刪除文獻！")
