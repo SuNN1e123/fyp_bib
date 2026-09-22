@@ -57,10 +57,12 @@ def init_db():
   if "filename" not in columns:
     c.execute("ALTER TABLE papers ADD COLUMN filename TEXT")
 
+  # 預設分類（包含「回收箱 (Trash)」）
   default_cats = [
       "引言 (Introduction)",
       "方法 (Methodology)",
       "實驗 (Experiments)",
+      "回收箱 (Trash)",
   ]
   for cat in default_cats:
     c.execute(
@@ -138,37 +140,35 @@ with tab1:
             "選擇要刪除的分類夾", categories, key="del_cat_select"
         )
         st.caption(
-            "⚠️ 注意：若該分類下還有文獻，刪除後文獻將會自動轉移至「引言"
-            " (Introduction)」！"
+            "⚠️ 注意：若該分類下還有文獻，刪除後文獻將會自動移至「回收箱"
+            " (Trash)」！"
         )
         if st.button("確認刪除此分類", type="primary"):
-          if len(categories) <= 1:
+          if cat_to_delete == "回收箱 (Trash)":
+            st.warning("「回收箱 (Trash)」是系統保留分類，不能刪除！")
+          elif len(categories) <= 1:
             st.warning("最少需要保留一個分類夾，不能全部刪除！")
           else:
-            fallback_cat = (
-                "引言 (Introduction)"
-                if cat_to_delete != "引言 (Introduction)"
-                else [c for c in categories if c != cat_to_delete][0]
-            )
-
-            # 將該分類下的文獻搬走
+            # 將該分類下的文獻全部搬去「回收箱 (Trash)」
+            fallback_cat = "回收箱 (Trash)"
             c.execute(
                 "UPDATE papers SET category = ? WHERE category = ?",
                 (fallback_cat, cat_to_delete),
             )
-            # 刪除分類本身
+            # 徹底刪除該分類本身
             c.execute(
                 "DELETE FROM categories WHERE name = ?", (cat_to_delete,)
             )
             conn.commit()
 
-            # 清除所有與選擇框或畫面相關的快取狀態，強行完整重整
+            # 清除所有舊狀態
             for key in list(st.session_state.keys()):
               if "del_cat" in key or "move_cat" in key:
                 del st.session_state[key]
 
             st.success(
-                f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全轉移至「{fallback_cat}」！"
+                f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全移至「回收箱"
+                " (Trash)」！"
             )
             st.rerun()
       else:
