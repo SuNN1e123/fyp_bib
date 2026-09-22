@@ -153,7 +153,7 @@ with tab1:
       if not cat_papers:
         st.caption(
             "暫時未有文獻歸納在此分類中。可透過「上載與 AI"
-            " 智能解析」加入，或在下方修改文獻分類。"
+            " 智能解析」加入, 或在下方修改文獻分類。"
         )
       else:
         for paper_id, title, authors, year, citation, filename, pdf_blob in (
@@ -217,10 +217,18 @@ with tab2:
     filename = uploaded_file.name
     default_title = filename.replace(".pdf", "").replace("_", " ")
 
-    ai_title = default_title
-    ai_authors = "Author et al."
-    ai_year = "2025"
-    ai_citation = f"{ai_authors} ({ai_year}). *{ai_title}*."
+    # 初始化 Session State 儲存 AI 解析結果，避免資料丟失
+    if "ai_title" not in st.session_state:
+      st.session_state.ai_title = default_title
+    if "ai_authors" not in st.session_state:
+      st.session_state.ai_authors = "Author et al."
+    if "ai_year" not in st.session_state:
+      st.session_state.ai_year = "2025"
+    if "ai_citation" not in st.session_state:
+      st.session_state.ai_citation = (
+          f"{st.session_state.ai_authors} ({st.session_state.ai_year})."
+          f" *{st.session_state.ai_title}*."
+      )
 
     if client is not None:
       if st.button(
@@ -258,23 +266,40 @@ with tab2:
             )
             paper_info = json.loads(clean_text)
 
-            ai_title = paper_info.get("title", default_title)
-            ai_authors = paper_info.get("authors", "Author et al.")
-            ai_year = paper_info.get("year", "2025")
-            ai_citation = paper_info.get(
-                "citation", f"{ai_authors} ({ai_year}). *{ai_title}*."
+            # 將抓取到的資料存入 Session State 中
+            st.session_state.ai_title = paper_info.get(
+                "title", default_title
+            )
+            st.session_state.ai_authors = paper_info.get(
+                "authors", "Author et al."
+            )
+            st.session_state.ai_year = paper_info.get("year", "2025")
+            st.session_state.ai_citation = paper_info.get(
+                "citation",
+                f"{st.session_state.ai_authors}"
+                f" ({st.session_state.ai_year})."
+                f" *{st.session_state.ai_title}*.",
             )
             st.success("✨ OpenRouter AI 成功提取並完成 APA 7 格式排版！")
+            st.rerun()  # 重新整理以即時更新表單欄位
           except Exception as e:
             st.error(f"AI 解析失敗，請手動確認。錯誤: {e}")
 
     with st.form("openrouter_upload_form"):
-      paper_title = st.text_input("文獻標題 (Title)", ai_title)
-      paper_authors = st.text_input("作者 (Authors - APA 7)", ai_authors)
-      paper_year = st.text_input("年份 (Year)", ai_year)
+      paper_title = st.text_input(
+          "文獻標題 (Title)", st.session_state.get("ai_title", default_title)
+      )
+      paper_authors = st.text_input(
+          "作者 (Authors - APA 7)",
+          st.session_state.get("ai_authors", "Author et al."),
+      )
+      paper_year = st.text_input(
+          "年份 (Year)", st.session_state.get("ai_year", "2025")
+      )
       paper_category = st.selectbox("選擇研究分類夾", categories)
       paper_citation = st.text_input(
-          "APA 7th 引用格式 (可手動微調)", ai_citation
+          "APA 7th 引用格式 (可手動微調)",
+          st.session_state.get("ai_citation", f"Author et al. (2025)."),
       )
 
       submitted = st.form_submit_button(
@@ -295,5 +320,11 @@ with tab2:
             ),
         )
         conn.commit()
+
+        # 提交成功後清除 session state，準備下一次上載
+        for key in ["ai_title", "ai_authors", "ai_year", "ai_citation"]:
+          if key in st.session_state:
+            del st.session_state[key]
+
         st.success("🎉 成功新增文獻及儲存 PDF 原件！紀錄已永久保存！")
         st.rerun()
