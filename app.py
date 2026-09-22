@@ -145,7 +145,6 @@ with tab1:
           if len(categories) <= 1:
             st.warning("最少需要保留一個分類夾，不能全部刪除！")
           else:
-            # 決定預備轉移目標（預設轉去引言，若刪的是引言則轉去其他剩餘分類）
             fallback_cat = (
                 "引言 (Introduction)"
                 if cat_to_delete != "引言 (Introduction)"
@@ -162,6 +161,12 @@ with tab1:
                 "DELETE FROM categories WHERE name = ?", (cat_to_delete,)
             )
             conn.commit()
+
+            # 清除所有與選擇框或畫面相關的快取狀態，強行完整重整
+            for key in list(st.session_state.keys()):
+              if "del_cat" in key or "move_cat" in key:
+                del st.session_state[key]
+
             st.success(
                 f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全轉移至「{fallback_cat}」！"
             )
