@@ -57,18 +57,21 @@ def init_db():
   if "filename" not in columns:
     c.execute("ALTER TABLE papers ADD COLUMN filename TEXT")
 
-  # 預設分類（包含「回收箱 (Trash)」）
-  default_cats = [
-      "引言 (Introduction)",
-      "方法 (Methodology)",
-      "實驗 (Experiments)",
-      "回收箱 (Trash)",
-  ]
-  for cat in default_cats:
-    c.execute(
-        "INSERT OR IGNORE INTO categories (name) VALUES (?)",
-        (cat,),
-    )
+  # 僅在資料庫完全沒有任何分類時，才初始化預設分類
+  c.execute("SELECT COUNT(*) FROM categories")
+  count = c.fetchone()[0]
+  if count == 0:
+    default_cats = [
+        "引言 (Introduction)",
+        "方法 (Methodology)",
+        "實驗 (Experiments)",
+        "回收箱 (Trash)",
+    ]
+    for cat in default_cats:
+      c.execute(
+          "INSERT OR IGNORE INTO categories (name) VALUES (?)",
+          (cat,),
+      )
   conn.commit()
   return conn, c
 
@@ -93,7 +96,7 @@ st.caption(
     " 文獻！"
 )
 
-# 讀取分類
+# 讀取當前資料庫中的分類
 c.execute("SELECT name FROM categories")
 categories = [row[0] for row in c.fetchall()]
 
@@ -149,22 +152,22 @@ with tab1:
           elif len(categories) <= 1:
             st.warning("最少需要保留一個分類夾，不能全部刪除！")
           else:
-            # 將該分類下的文獻全部搬去「回收箱 (Trash)」
+            # 1. 將該分類下的文獻全部搬去「回收箱 (Trash)」
             fallback_cat = "回收箱 (Trash)"
             c.execute(
                 "UPDATE papers SET category = ? WHERE category = ?",
                 (fallback_cat, cat_to_delete),
             )
-            # 徹底刪除該分類本身
+            # 2. 確保「回收箱 (Trash)」分類本身存在於 categories 表格中
+            c.execute(
+                "INSERT OR IGNORE INTO categories (name) VALUES (?)",
+                (fallback_cat,),
+            )
+            # 3. 徹底從 categories 表格刪除該分類
             c.execute(
                 "DELETE FROM categories WHERE name = ?", (cat_to_delete,)
             )
             conn.commit()
-
-            # 清除所有舊狀態
-            for key in list(st.session_state.keys()):
-              if "del_cat" in key or "move_cat" in key:
-                del st.session_state[key]
 
             st.success(
                 f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全移至「回收箱"
@@ -201,7 +204,7 @@ with tab1:
       if not cat_papers:
         st.caption(
             "暫時未有文獻歸納在此分類中。可透過「上載與 AI"
-            " 智能解析」加入，或在下方修改文獻分類。"
+            " 智能解析」加入, 或在下方修改文獻分類。"
         )
       else:
         for paper_id, title, authors, year, citation, filename, pdf_blob in (
