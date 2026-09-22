@@ -57,6 +57,10 @@ def init_db():
   if "filename" not in columns:
     c.execute("ALTER TABLE papers ADD COLUMN filename TEXT")
 
+  # 確保 sort_order 欄位存在（用來記錄自訂排序，若未啟用 A-Z 則依 id 排序）
+  if "sort_order" not in columns:
+    c.execute("ALTER TABLE papers ADD COLUMN sort_order INTEGER DEFAULT 0")
+
   # 僅在資料庫完全沒有任何分類時，才初始化預設分類
   c.execute("SELECT COUNT(*) FROM categories")
   count = c.fetchone()[0]
@@ -90,9 +94,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✨ My FYP Research Hub (分區卡片 + 移動/複製文獻)")
+st.title("✨ My FYP Research Hub (編號排序 + 字母 A-Z 排序)")
 st.caption(
-    "結合獨立分類卡片框、PDF 原件儲存，以及便捷的文獻移動與複製功能，高效管理您的"
+    "結合數字序號、標題字母排序、PDF 原件儲存，以及流暢的文獻移動與複製功能，高效管理您的"
     " FYP 文獻！"
 )
 
@@ -181,13 +185,38 @@ with tab1:
 
   for cat in categories:
     with st.container():
-      st.markdown(
-          f"<div style='background-color: #f1f3f5; padding: 10px 15px;"
-          f" border-radius: 8px; font-weight: bold; font-size: 16px; margin-top:"
-          f" 15px; margin-bottom: 10px;'>📌 {cat}</div>",
-          unsafe_allow_html=True,
-      )
+      # 標題列與 A-Z 排序按鈕並排
+      col_header_title, col_header_btn = st.columns([4, 1])
+      with col_header_title:
+        st.markdown(
+            f"<div style='background-color: #f1f3f5; padding: 10px 15px;"
+            f" border-radius: 8px; font-weight: bold; font-size: 16px;"
+            f" margin-top: 15px; margin-bottom: 10px;'>📌 {cat}</div>",
+            unsafe_allow_html=True,
+        )
+      with col_header_btn:
+        st.markdown(
+            "<div style='margin-top: 12px;'>", unsafe_allow_html=True
+        )
+        if st.button("🔤 按 A-Z 排序", key=f"sort_az_{cat}"):
+          # 查詢該分類下所有文獻並按標題字母排序
+          c.execute(
+              "SELECT id FROM papers WHERE category = ? ORDER BY title COLLATE"
+              " NOCASE ASC",
+              (cat,),
+          )
+          sorted_rows = c.fetchall()
+          for idx, (p_id,) in enumerate(sorted_rows):
+            c.execute(
+                "UPDATE papers SET sort_order = ? WHERE id = ?",
+                (idx, p_id),
+            )
+          conn.commit()
+          st.success(f"已將「{cat}」內的文獻順利按字母 A-Z 排列！")
+          st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
+      # 讀取文獻（優先根據 sort_order 排序，若相同則按 id 排序）
       query_sql = (
           "SELECT id, title, authors, year, citation, filename, pdf_data FROM"
           " papers WHERE category = ?"
@@ -198,6 +227,8 @@ with tab1:
         query_sql += " AND (title LIKE ? OR authors LIKE ?)"
         params.extend([f"%{search_query}%", f"%{search_query}%"])
 
+      query_sql += " ORDER BY sort_order ASC, id ASC"
+
       c.execute(query_sql, params)
       cat_papers = c.fetchall()
 
@@ -207,10 +238,17 @@ with tab1:
             " 智能解析」加入，或使用下方功能進行移動/複製。"
         )
       else:
-        for paper_id, title, authors, year, citation, filename, pdf_blob in (
-            cat_papers
-        ):
-          with st.expander(f"📄 {title} ({year}) — {authors}"):
+        for idx, (
+            paper_id,
+            title,
+            authors,
+            year,
+            citation,
+            filename,
+            pdf_blob,
+        ) in enumerate(cat_papers, 1):
+          # 在 Expander 左側加上數字編號 (例如：1. 2. 3.)
+          with st.expander(f"{idx}. 📄 {title} ({year}) — {authors}"):
             st.write(f"**作者：** {authors}")
             st.write(f"**APA 7th Citation：** `{citation}`")
 
@@ -256,8 +294,8 @@ with tab1:
               )
               if st.button("📋 複製", key=f"btn_copy_{paper_id}"):
                 c.execute(
-                    """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename, sort_order)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
                     (
                         title,
                         authors,
@@ -383,9 +421,17 @@ with tab2:
           "💾 確認無誤並加入資料庫（含 PDF 原件）", type="primary"
       )
       if submitted:
+        # 新增時自動排在最後面 (sort_order 設為當前該分類最大值 + 1)
         c.execute(
-            """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            "SELECT MAX(sort_order) FROM papers WHERE category = ?",
+            (paper_category,),
+        )
+        max_order = c.fetchone()[0]
+        new_order = 0 if max_order is None else max_order + 1
+
+        c.execute(
+            """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename, sort_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 paper_title,
                 paper_authors,
@@ -394,6 +440,7 @@ with tab2:
                 paper_citation,
                 sqlite3.Binary(file_bytes),
                 filename,
+                new_order,
             ),
         )
         conn.commit()
