@@ -107,24 +107,67 @@ with tab1:
 
   st.divider()
 
-  with st.expander("➕ 建立新分類夾 / 資料夾"):
-    new_cat = st.text_input(
-        "輸入新分類名稱 (例如：Related Work)", key="new_cat_input"
-    )
-    if st.button("建立分類"):
-      if new_cat:
-        try:
-          c.execute(
-              "INSERT INTO categories (name) VALUES (?)",
-              (new_cat,),
-          )
-          conn.commit()
-          st.success(f"成功新增分類夾：{new_cat}")
-          st.rerun()
-        except sqlite3.IntegrityError:
-          st.info("呢個分類已經存在喇！")
+  # 分類管理區塊（包含建立與刪除）
+  with st.expander("📁 管理研究分類夾 (新增 / 刪除)"):
+    col_add, col_del = st.columns(2)
+
+    with col_add:
+      st.markdown("#### ➕ 建立新分類夾")
+      new_cat = st.text_input(
+          "輸入新分類名稱 (例如：Related Work)", key="new_cat_input"
+      )
+      if st.button("建立分類"):
+        if new_cat:
+          try:
+            c.execute(
+                "INSERT INTO categories (name) VALUES (?)",
+                (new_cat,),
+            )
+            conn.commit()
+            st.success(f"成功新增分類夾：{new_cat}")
+            st.rerun()
+          except sqlite3.IntegrityError:
+            st.info("呢個分類已經存在喇！")
+        else:
+          st.warning("請輸入分類名稱！")
+
+    with col_del:
+      st.markdown("#### 🗑️ 刪除分類夾")
+      if categories:
+        cat_to_delete = st.selectbox(
+            "選擇要刪除的分類夾", categories, key="del_cat_select"
+        )
+        st.caption(
+            "⚠️ 注意：若該分類下還有文獻，刪除後文獻將會自動轉移至「引言"
+            " (Introduction)」！"
+        )
+        if st.button("確認刪除此分類", type="primary"):
+          if len(categories) <= 1:
+            st.warning("最少需要保留一個分類夾，不能全部刪除！")
+          else:
+            # 決定預備轉移目標（預設轉去引言，若刪的是引言則轉去其他剩餘分類）
+            fallback_cat = (
+                "引言 (Introduction)"
+                if cat_to_delete != "引言 (Introduction)"
+                else [c for c in categories if c != cat_to_delete][0]
+            )
+
+            # 將該分類下的文獻搬走
+            c.execute(
+                "UPDATE papers SET category = ? WHERE category = ?",
+                (fallback_cat, cat_to_delete),
+            )
+            # 刪除分類本身
+            c.execute(
+                "DELETE FROM categories WHERE name = ?", (cat_to_delete,)
+            )
+            conn.commit()
+            st.success(
+                f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全轉移至「{fallback_cat}」！"
+            )
+            st.rerun()
       else:
-        st.warning("請輸入分類名稱！")
+        st.info("目前沒有可刪除的分類。")
 
   st.markdown("### 📂 研究分類分區檢視")
 
@@ -153,7 +196,7 @@ with tab1:
       if not cat_papers:
         st.caption(
             "暫時未有文獻歸納在此分類中。可透過「上載與 AI"
-            " 智能解析」加入, 或在下方修改文獻分類。"
+            " 智能解析」加入，或在下方修改文獻分類。"
         )
       else:
         for paper_id, title, authors, year, citation, filename, pdf_blob in (
@@ -217,7 +260,6 @@ with tab2:
     filename = uploaded_file.name
     default_title = filename.replace(".pdf", "").replace("_", " ")
 
-    # 初始化 Session State 儲存 AI 解析結果，避免資料丟失
     if "ai_title" not in st.session_state:
       st.session_state.ai_title = default_title
     if "ai_authors" not in st.session_state:
@@ -266,7 +308,6 @@ with tab2:
             )
             paper_info = json.loads(clean_text)
 
-            # 將抓取到的資料存入 Session State 中
             st.session_state.ai_title = paper_info.get(
                 "title", default_title
             )
@@ -281,7 +322,7 @@ with tab2:
                 f" *{st.session_state.ai_title}*.",
             )
             st.success("✨ OpenRouter AI 成功提取並完成 APA 7 格式排版！")
-            st.rerun()  # 重新整理以即時更新表單欄位
+            st.rerun()
           except Exception as e:
             st.error(f"AI 解析失敗，請手動確認。錯誤: {e}")
 
@@ -321,7 +362,6 @@ with tab2:
         )
         conn.commit()
 
-        # 提交成功後清除 session state，準備下一次上載
         for key in ["ai_title", "ai_authors", "ai_year", "ai_citation"]:
           if key in st.session_state:
             del st.session_state[key]
