@@ -1,16 +1,22 @@
 from datetime import datetime
+import hashlib
 import io
-import sqlite3
-import fitz  # PyMuPDF
 import json
+import fitz  # PyMuPDF
 from openai import OpenAI
+import psycopg2
 import streamlit as st
 
-# --- 安全讀取 OpenRouter API Key ---
+# --- 安全讀取 Secrets ---
 try:
   OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 except Exception:
   OPENROUTER_API_KEY = ""
+
+try:
+  SUPABASE_DB_URL = st.secrets["SUPABASE_DB_URL"]
+except Exception:
+  SUPABASE_DB_URL = ""
 
 # 初始化 OpenRouter Client
 client = None
@@ -21,70 +27,66 @@ if OPENROUTER_API_KEY:
     )
   except Exception as e:
     st.error(f"OpenRouter 初始化失敗: {e}")
-else:
-  st.warning(
-      "⚠️ 偵測不到 OPENROUTER_API_KEY，請在 Streamlit Secrets 或設定中配置。"
-  )
 
 
-# --- 初始化與自動升級 SQLite 資料庫 ---
+# --- 初始化 Supabase 雲端 PostgreSQL 資料庫連線 ---
 def init_db():
-  conn = sqlite3.connect("fyp_papers.db", check_same_thread=False)
-  c = conn.cursor()
+  if not SUPABASE_DB_URL:
+    st.error("❌ 找不到 SUPABASE_DB_URL，請檢查 Streamlit Secrets 設定！")
+    st.stop()
 
-  c.execute("""
-        CREATE TABLE IF NOT EXISTS papers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            authors TEXT,
-            year TEXT,
-            category TEXT,
-            citation TEXT
-        )
-    """)
-  c.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE
-        )
-    """)
+  try:
+    # 建立連線 (autocommit=True 確保即時寫入)
+    conn = psycopg2.connect(SUPABASE_DB_URL, sslmode="require")
+    conn.autocommit = True
+    c = conn.cursor()
 
-  c.execute("PRAGMA table_info(papers)")
-  columns = [col[1] for col in c.fetchall()]
+    # 1. 用戶表格
+    c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE,
+                password TEXT
+            )
+        """)
 
-  if "pdf_data" not in columns:
-    c.execute("ALTER TABLE papers ADD COLUMN pdf_data BLOB")
-  if "filename" not in columns:
-    c.execute("ALTER TABLE papers ADD COLUMN filename TEXT")
+    # 2. 分類表格（加上 user_id 隔離）
+    c.execute("""
+            CREATE TABLE IF NOT EXISTS categories (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                name TEXT
+            )
+        """)
 
-  # 確保 sort_order 欄位存在（用來記錄自訂排序，若未啟用 A-Z 則依 id 排序）
-  if "sort_order" not in columns:
-    c.execute("ALTER TABLE papers ADD COLUMN sort_order INTEGER DEFAULT 0")
-
-  # 僅在資料庫完全沒有任何分類時，才初始化預設分類
-  c.execute("SELECT COUNT(*) FROM categories")
-  count = c.fetchone()[0]
-  if count == 0:
-    default_cats = [
-        "引言 (Introduction)",
-        "方法 (Methodology)",
-        "實驗 (Experiments)",
-        "回收箱 (Trash)",
-    ]
-    for cat in default_cats:
-      c.execute(
-          "INSERT OR IGNORE INTO categories (name) VALUES (?)",
-          (cat,),
-      )
-  conn.commit()
-  return conn, c
+    # 3. 文獻表格（加上 user_id 隔離，PDF 使用 BYTEA 儲存）
+    c.execute("""
+            CREATE TABLE IF NOT EXISTS papers (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                title TEXT,
+                authors TEXT,
+                year TEXT,
+                category TEXT,
+                citation TEXT,
+                pdf_data BYTEA,
+                filename TEXT,
+                sort_order INTEGER DEFAULT 0
+            )
+        """)
+    return conn, c
+  except Exception as e:
+    st.error(f"資料庫連線失敗: {e}")
+    st.stop()
 
 
 conn, c = init_db()
 
 # 設定網頁排版
 st.set_page_config(
-    page_title="My FYP Research Hub", page_icon="✨", layout="wide"
+    page_title="My FYP Research Hub - 永久雲端多用戶版",
+    page_icon="✨",
+    layout="wide",
 )
 
 st.markdown("""
@@ -94,19 +96,119 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✨ My FYP Research Hub (編號排序 + 字母 A-Z 排序)")
+
+# --- 密碼雜湊輔助函數 ---
+def hash_password(password):
+  return hashlib.sha256(password.encode()).hexdigest()
+
+
+# --- 用戶登入與註冊狀態管理 ---
+if "logged_in" not in st.session_state:
+  st.session_state.logged_in = False
+if "username" not in st.session_state:
+  st.session_state.username = ""
+if "user_id" not in st.session_state:
+  st.session_state.user_id = None
+
+# ----------------- 未登入：顯示登入／註冊介面 -----------------
+if not st.session_state.logged_in:
+  st.title("✨ My FYP Research Hub - 登入專屬你的雲端文獻庫")
+  st.caption(
+      "資料已全面遷移至雲端資料庫（Supabase），所有帳號與 PDF 將永久保存不丟失！"
+  )
+
+  auth_tab1, auth_tab2 = st.tabs(["🔑 登入帳號", "📝 註冊新帳號"])
+
+  with auth_tab1:
+    with st.form("login_form"):
+      login_user = st.text_input("用戶名稱 (Username)")
+      login_pass = st.text_input("密碼 (Password)", type="password")
+      login_submitted = st.form_submit_button("登入", type="primary")
+
+      if login_submitted:
+        hashed_pw = hash_password(login_pass)
+        c.execute(
+            "SELECT id FROM users WHERE username = %s AND password = %s",
+            (login_user, hashed_pw),
+        )
+        user_row = c.fetchone()
+        if user_row:
+          st.session_state.logged_in = True
+          st.session_state.username = login_user
+          st.session_state.user_id = user_row[0]
+          st.success(f"歡迎回來，{login_user}！正在進入你的雲端 Hub...")
+          st.rerun()
+        else:
+          st.error("登入失敗：用戶名稱或密碼錯誤。")
+
+  with auth_tab2:
+    with st.form("register_form"):
+      reg_user = st.text_input("設定用戶名稱 (Username)")
+      reg_pass = st.text_input("設定密碼 (Password)", type="password")
+      reg_submitted = st.form_submit_button("註冊並自動建立預設分類", type="primary")
+
+      if reg_submitted:
+        if not reg_user or not reg_pass:
+          st.warning("用戶名稱與密碼不能為空！")
+        else:
+          try:
+            hashed_pw = hash_password(reg_pass)
+            c.execute(
+                "INSERT INTO users (username, password) VALUES (%s, %s)",
+                (reg_user, hashed_pw),
+            )
+
+            # 取得新註冊用戶的 id
+            c.execute("SELECT id FROM users WHERE username = %s", (reg_user,))
+            new_uid = c.fetchone()[0]
+
+            # 為新用戶初始化預設分類
+            default_cats = [
+                "引言 (Introduction)",
+                "方法 (Methodology)",
+                "實驗 (Experiments)",
+                "回收箱 (Trash)",
+            ]
+            for cat in default_cats:
+              c.execute(
+                  "INSERT INTO categories (user_id, name) VALUES (%s, %s)",
+                  (new_uid, cat),
+              )
+
+            st.success(
+                "🎉 雲端帳號註冊成功！請切換到「🔑 登入帳號」分頁進行登入。"
+            )
+          except Exception:
+            st.error("該用戶名稱已經被註冊，請嘗試其他名稱。")
+
+  st.stop()
+
+# ----------------- 已登入：顯示用戶專屬的 FYP Hub -----------------
+current_uid = st.session_state.user_id
+
+st.sidebar.markdown(f"👤 當前用戶：**{st.session_state.username}**")
+if st.sidebar.button("🚪 登出帳號"):
+  st.session_state.logged_in = False
+  st.session_state.username = ""
+  st.session_state.user_id = None
+  st.rerun()
+
+st.title(f"✨ {st.session_state.username}'s FYP Research Hub (雲端永久版)")
 st.caption(
-    "結合數字序號、標題字母排序、PDF 原件儲存，以及流暢的文獻移動與複製功能，高效管理您的"
-    " FYP 文獻！"
+    "專屬你的文獻管理平台：資料安全儲存於 Supabase 雲端，支援分區卡片檢視、A-Z"
+    " 排序與 AI 智能解析。"
 )
 
-# 讀取當前資料庫中的分類
-c.execute("SELECT name FROM categories")
+# 讀取當前用戶專屬的分類
+c.execute(
+    "SELECT name FROM categories WHERE user_id = %s ORDER BY id ASC",
+    (current_uid,),
+)
 categories = [row[0] for row in c.fetchall()]
 
 tab1, tab2 = st.tabs(["📚 文獻分區資料庫 (Dashboard)", "📤 上載與 AI 智能解析"])
 
-# --- 分頁一：文獻資料庫（分區卡片檢視） ---
+# --- 分頁一：文獻資料庫 ---
 with tab1:
   col_search, col_action = st.columns([3, 1])
   with col_search:
@@ -116,7 +218,7 @@ with tab1:
 
   st.divider()
 
-  # 分類管理區塊（包含建立與刪除）
+  # 分類管理區塊
   with st.expander("📁 管理研究分類夾 (新增 / 刪除)"):
     col_add, col_del = st.columns(2)
 
@@ -127,16 +229,20 @@ with tab1:
       )
       if st.button("建立分類"):
         if new_cat:
-          try:
+          c.execute(
+              "SELECT COUNT(*) FROM categories WHERE user_id = %s AND name ="
+              " %s",
+              (current_uid, new_cat),
+          )
+          if c.fetchone()[0] > 0:
+            st.info("呢個分類已經存在喇！")
+          else:
             c.execute(
-                "INSERT INTO categories (name) VALUES (?)",
-                (new_cat,),
+                "INSERT INTO categories (user_id, name) VALUES (%s, %s)",
+                (current_uid, new_cat),
             )
-            conn.commit()
             st.success(f"成功新增分類夾：{new_cat}")
             st.rerun()
-          except sqlite3.IntegrityError:
-            st.info("呢個分類已經存在喇！")
         else:
           st.warning("請輸入分類名稱！")
 
@@ -156,23 +262,22 @@ with tab1:
           elif len(categories) <= 1:
             st.warning("最少需要保留一個分類夾，不能全部刪除！")
           else:
-            # 1. 將該分類下的文獻全部搬去「回收箱 (Trash)」
             fallback_cat = "回收箱 (Trash)"
             c.execute(
-                "UPDATE papers SET category = ? WHERE category = ?",
-                (fallback_cat, cat_to_delete),
+                "UPDATE papers SET category = %s WHERE user_id = %s AND category"
+                " = %s",
+                (fallback_cat, current_uid, cat_to_delete),
             )
-            # 2. 確保「回收箱 (Trash)」分類本身存在於 categories 表格中
             c.execute(
-                "INSERT OR IGNORE INTO categories (name) VALUES (?)",
-                (fallback_cat,),
+                "INSERT INTO categories (user_id, name) SELECT %s, %s WHERE NOT"
+                " EXISTS (SELECT 1 FROM categories WHERE user_id = %s AND name"
+                " = %s)",
+                (current_uid, fallback_cat, current_uid, fallback_cat),
             )
-            # 3. 徹底從 categories 表格刪除該分類
             c.execute(
-                "DELETE FROM categories WHERE name = ?", (cat_to_delete,)
+                "DELETE FROM categories WHERE user_id = %s AND name = %s",
+                (current_uid, cat_to_delete),
             )
-            conn.commit()
-
             st.success(
                 f"成功刪除分類「{cat_to_delete}」，入面嘅文獻已安全移至「回收箱"
                 " (Trash)」！"
@@ -185,7 +290,6 @@ with tab1:
 
   for cat in categories:
     with st.container():
-      # 標題列與 A-Z 排序按鈕並排
       col_header_title, col_header_btn = st.columns([4, 1])
       with col_header_title:
         st.markdown(
@@ -199,32 +303,29 @@ with tab1:
             "<div style='margin-top: 12px;'>", unsafe_allow_html=True
         )
         if st.button("🔤 按 A-Z 排序", key=f"sort_az_{cat}"):
-          # 查詢該分類下所有文獻並按標題字母排序
           c.execute(
-              "SELECT id FROM papers WHERE category = ? ORDER BY title COLLATE"
-              " NOCASE ASC",
-              (cat,),
+              "SELECT id FROM papers WHERE user_id = %s AND category = %s ORDER"
+              " BY title ASC",
+              (current_uid, cat),
           )
           sorted_rows = c.fetchall()
           for idx, (p_id,) in enumerate(sorted_rows):
             c.execute(
-                "UPDATE papers SET sort_order = ? WHERE id = ?",
+                "UPDATE papers SET sort_order = %s WHERE id = %s",
                 (idx, p_id),
             )
-          conn.commit()
           st.success(f"已將「{cat}」內的文獻順利按字母 A-Z 排列！")
           st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-      # 讀取文獻（優先根據 sort_order 排序，若相同則按 id 排序）
       query_sql = (
           "SELECT id, title, authors, year, citation, filename, pdf_data FROM"
-          " papers WHERE category = ?"
+          " papers WHERE user_id = %s AND category = %s"
       )
-      params = [cat]
+      params = [current_uid, cat]
 
       if search_query:
-        query_sql += " AND (title LIKE ? OR authors LIKE ?)"
+        query_sql += " AND (title ILIKE %s OR authors ILIKE %s)"
         params.extend([f"%{search_query}%", f"%{search_query}%"])
 
       query_sql += " ORDER BY sort_order ASC, id ASC"
@@ -233,10 +334,7 @@ with tab1:
       cat_papers = c.fetchall()
 
       if not cat_papers:
-        st.caption(
-            "暫時未有文獻歸納在此分類中。可透過「上載與 AI"
-            " 智能解析」加入，或使用下方功能進行移動/複製。"
-        )
+        st.caption("暫時未有文獻歸納在此分類中。")
       else:
         for idx, (
             paper_id,
@@ -247,19 +345,23 @@ with tab1:
             filename,
             pdf_blob,
         ) in enumerate(cat_papers, 1):
-          # 在 Expander 左側加上數字編號 (例如：1. 2. 3.)
           with st.expander(f"{idx}. 📄 {title} ({year}) — {authors}"):
             st.write(f"**作者：** {authors}")
             st.write(f"**APA 7th Citation：** `{citation}`")
 
-            # 操作按鈕佈局調整
             col_dl, col_move, col_copy, col_del = st.columns([2, 2, 2, 1])
 
             with col_dl:
               if pdf_blob:
+                # PostgreSQL BYTEA 轉換成 bytes
+                pdf_bytes = (
+                    bytes(pdf_blob)
+                    if isinstance(pdf_blob, memoryview)
+                    else pdf_blob
+                )
                 st.download_button(
                     label="📥 下載 PDF",
-                    data=pdf_blob,
+                    data=pdf_bytes,
                     file_name=filename if filename else f"paper_{paper_id}.pdf",
                     mime="application/pdf",
                     key=f"dl_{paper_id}",
@@ -277,10 +379,10 @@ with tab1:
               )
               if st.button("🚚 移動", key=f"btn_move_{paper_id}"):
                 c.execute(
-                    "UPDATE papers SET category = ? WHERE id = ?",
-                    (target_move_cat, paper_id),
+                    "UPDATE papers SET category = %s WHERE id = %s AND user_id"
+                    " = %s",
+                    (target_move_cat, paper_id, current_uid),
                 )
-                conn.commit()
                 st.success(f"已成功移動至：{target_move_cat}")
                 st.rerun()
 
@@ -294,9 +396,10 @@ with tab1:
               )
               if st.button("📋 複製", key=f"btn_copy_{paper_id}"):
                 c.execute(
-                    """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename, sort_order)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                    """INSERT INTO papers (user_id, title, authors, year, category, citation, pdf_data, filename, sort_order)
+                                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)""",
                     (
+                        current_uid,
                         title,
                         authors,
                         year,
@@ -306,14 +409,15 @@ with tab1:
                         filename,
                     ),
                 )
-                conn.commit()
                 st.success(f"已成功複製一份至：{target_copy_cat}")
                 st.rerun()
 
             with col_del:
               if st.button("🗑️ 刪除", key=f"del_{paper_id}"):
-                c.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
-                conn.commit()
+                c.execute(
+                    "DELETE FROM papers WHERE id = %s AND user_id = %s",
+                    (paper_id, current_uid),
+                )
                 st.success("已刪除文獻！")
                 st.rerun()
 
@@ -321,7 +425,7 @@ with tab1:
 
 # --- 分頁二：上載與 AI 解析 ---
 with tab2:
-  st.subheader("📤 上載 PDF 文獻與 OpenRouter AI 智能提取")
+  st.subheader("📤 上載 PDF 文獻與 OpenRouter AI 智能提取 (雲端永久儲存)")
   uploaded_file = st.file_uploader(
       "拖放或選擇你的 PDF 檔案 (建議包含第一頁)", type="pdf"
   )
@@ -418,36 +522,40 @@ with tab2:
       )
 
       submitted = st.form_submit_button(
-          "💾 確認無誤並加入資料庫（含 PDF 原件）", type="primary"
+          "💾 確認無誤並加入雲端資料庫（含 PDF 原件）", type="primary"
       )
       if submitted:
-        # 新增時自動排在最後面 (sort_order 設為當前該分類最大值 + 1)
         c.execute(
-            "SELECT MAX(sort_order) FROM papers WHERE category = ?",
-            (paper_category,),
+            "SELECT MAX(sort_order) FROM papers WHERE user_id = %s AND category"
+            " = %s",
+            (current_uid, paper_category),
         )
-        max_order = c.fetchone()[0]
-        new_order = 0 if max_order is None else max_order + 1
+        res = c.fetchone()
+        max_order = res[0] if res and res[0] is not None else -1
+        new_order = max_order + 1
+
+        # 將檔案 binary 透過 psycopg2 轉為 Binary 物件存入 BYTEA
+        binary_pdf = psycopg2.Binary(file_bytes)
 
         c.execute(
-            """INSERT INTO papers (title, authors, year, category, citation, pdf_data, filename, sort_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO papers (user_id, title, authors, year, category, citation, pdf_data, filename, sort_order)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
+                current_uid,
                 paper_title,
                 paper_authors,
                 paper_year,
                 paper_category,
                 paper_citation,
-                sqlite3.Binary(file_bytes),
+                binary_pdf,
                 filename,
                 new_order,
             ),
         )
-        conn.commit()
 
         for key in ["ai_title", "ai_authors", "ai_year", "ai_citation"]:
           if key in st.session_state:
             del st.session_state[key]
 
-        st.success("🎉 成功新增文獻及儲存 PDF 原件！紀錄已永久保存！")
+        st.success("🎉 成功新增文獻及將 PDF 儲存至雲端資料庫！資料將永久保存！")
         st.rerun()
