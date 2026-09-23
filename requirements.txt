@@ -1,3 +1,4 @@
 streamlit
-pymupdf
+psycopg2-binary
+PyMuPDF
 openai
